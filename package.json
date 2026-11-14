@@ -1,0 +1,16 @@
+{
+  "name": "pet-kit-local",
+  "version": "0.1.0",
+  "private": true,
+  "description": "给 dsh-pet 0.4.8 补回「投喂 / 状态」：第三方菜单项 + 公开 HTTP 接口，不改上游一行",
+  "type": "module",
+  "main": "index.js",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
