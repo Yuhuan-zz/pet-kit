@@ -1,26 +1,29 @@
 /**
- * pet-kit-local —— 本机版「投喂 / 状态」
+ * pet-kit-local —— 本机版「投喂 / 状态 / 看眼屏幕」
  *
- * 为什么是独立插件：0.4.8 已经原生做了语音/时间/待办/对话，但**没有**饱腹度。
- * 0.3.8 时代它是补丁打进 dsh-pet 包里的，现在那个补丁退役了，这里用 0.4.8 的
- * 公开接口把这两项挂回来：
+ * 为什么是独立插件：0.4.8 已经原生做了语音/时间/待办/对话，但**没有**饱腹度，
+ * 也**没有**"她自己看屏幕"这条主动行为。0.3.8 时代这两块是补丁打进 dsh-pet 包里的，
+ * 现在那个补丁退役了，这里用 0.4.8 的公开接口挂回来：
  *
  *   菜单：POST /dsh-pet-7340/menu/item   { owner, labels }   → 落在右键「更多」下
  *   点击：GET  /dsh-pet-7340/menu/events?owner=&wait=        → 读取即消费
- *   演出：POST /lock → /anim → /broadcast → /lock/release
+ *   说话：POST /lock → /anim → /broadcast → /lock/release
+ *   看屏：ffmpeg ddagrab 抓一帧 → POST /chat（带 attachment）→ 进她的记忆
  *
  * 不碰 dsh-pet 的任何文件，不改它的包，只走 HTTP。
- * 数据落在 <DSH_HOME>/pet-kit/feed-state.json；第一次启动时从
- * <DSH_HOME>/dsh-pet/feed-state.json 续上（饱腹度不从 100% 重来）。
+ * 数据落在 <DSH_HOME>/pet-kit/：feed-state.json（饱腹度）、config.json（看屏设置）、
+ * look-stat.json（每日预算计数）。饱腹度首次从 dsh-pet 目录续上，不从 100% 重来。
  *
  * @module pet-kit-local
  */
+import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 export const OWNER = 'pet-kit';
-export const LABELS = { feed: '投喂', status: '状态' };
+export const LABELS = { feed: '投喂', status: '状态', look: '看眼屏幕' };
 
 /* ---------------- 饱腹度规则（与 0.3.8 补丁逐字一致） ---------------- */
 const FEED_DEFAULT = 100;
@@ -138,12 +141,12 @@ export function statusText(r) {
 /* ---------------- 与 dsh-pet 的 HTTP 通信 ---------------- */
 
 function makeApi(baseUrl) {
-  const call = async (path, { method = 'GET', body } = {}) => {
+  const call = async (path, { method = 'GET', body, timeoutMs = 8000 } = {}) => {
     const res = await fetch(baseUrl + path, {
       method,
       headers: body === undefined ? undefined : { 'content-type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     const text = await res.text();
     try {
@@ -160,15 +163,63 @@ function makeApi(baseUrl) {
     release: (pet, lockId) => call(`/lock/release?pet=${encodeURIComponent(pet)}&surface=any`, { method: 'POST', body: { lockId } }),
     anim: (pet, lockId, name) => call(`/anim?pet=${encodeURIComponent(pet)}&surface=any&lock=${encodeURIComponent(lockId)}`, { method: 'POST', body: { name } }),
     broadcast: (pet, lockId, payload) => call(`/broadcast?pet=${encodeURIComponent(pet)}&surface=any&lock=${encodeURIComponent(lockId)}`, { method: 'POST', body: payload }),
+    // 看屏走 /chat：图片进她的对话记忆，回复自动进气泡（不用再二次投喂）
+    chat: (pet, body) => call(`/chat?pet=${encodeURIComponent(pet)}&surface=any`, { method: 'POST', body, timeoutMs: 60000 }),
   };
+}
+
+/* ---------------- 看屏：抓帧 + 触发策略 ---------------- */
+
+const LOOK_DEFAULTS = {
+  mode: 'passive', // passive=只有点菜单才看；active=定时看
+  intervalSec: 90,
+  dailyBudget: 24,
+  prompt: '（她抬眼看了下屏幕）',
+  ffmpeg: 'ffmpeg',
+  width: 1600,
+  quality: 4,
+};
+
+function readLookConfig(configPath) {
+  let raw = {};
+  try {
+    raw = JSON.parse(readFileSync(configPath, 'utf8'));
+  } catch {
+    raw = {};
+  }
+  return { ...LOOK_DEFAULTS, ...(raw.look || {}) };
+}
+
+/**
+ * 抓一帧屏幕（JPEG 字节，不落盘）。
+ * 用 ffmpeg 的 ddagrab（DXGI Desktop Duplication）：和 Electron 的 desktopCapturer 一样是
+ * **合成后的桌面**，所以视频/硬件加速的画面不会像 GDI 那样截成白屏。
+ * 游戏要开无边窗（独占全屏不进合成，谁抓都是黑的）。
+ */
+function grabScreen({ ffmpeg, width, quality }) {
+  return new Promise((resolve, reject) => {
+    const args = [
+      '-hide_banner', '-loglevel', 'error',
+      '-f', 'lavfi', '-i', 'ddagrab=output_idx=0',
+      '-vf', `hwdownload,format=bgra,scale=${width}:-2`,
+      '-frames:v', '1', '-f', 'mjpeg', '-q:v', String(quality), 'pipe:1',
+    ];
+    execFile(ffmpeg, args, { encoding: 'buffer', maxBuffer: 64 * 1024 * 1024, timeout: 15000 }, (err, stdout) => {
+      if (err) reject(err);
+      else if (!stdout || stdout.length < 1000) reject(new Error('ffmpeg 没有吐出有效帧'));
+      else resolve(Buffer.from(stdout));
+    });
+  });
 }
 
 /**
  * 造一个 pet-kit 实例（不含菜单轮询，方便单测）。
  * @param {{ baseUrl: string, statePath: string, log?: (s: string) => void }} opts
  */
-export function createPetKit({ baseUrl, statePath, log = () => {} }) {
+export function createPetKit({ baseUrl, statePath, configPath = join(dirname(statePath), 'config.json'), log = () => {} }) {
   const api = makeApi(baseUrl);
+  const statPath = join(dirname(configPath), 'look-stat.json');
+  let lastFrameHash = '';
 
   /** 一次完整的「说一句 + 演一次」：锁 → 动画 → 气泡 → 放锁。 */
   async function perform(petId, { text, anim, duration }) {
@@ -208,7 +259,54 @@ export function createPetKit({ baseUrl, statePath, log = () => {} }) {
     return { ok: out.ok, satiety: Math.round(r.satiety * 10) / 10, tier: r.tier, text, spoken: out.ok };
   }
 
-  return { feed, status, registerMenu: api.registerMenu, readEvents: api.readEvents, api };
+  /**
+   * 看一眼前屏，让她说一句（走 /chat：进记忆，回复自动进气泡）。
+   * force=true 是手动点击：绕过模式、去重和每日预算（用户明确要看）。
+   */
+  async function look(petId = 'main', { force = false } = {}) {
+    const cfg = readLookConfig(configPath);
+    if (!force && cfg.mode !== 'active') return { ok: false, reason: 'passive-mode' };
+
+    // 每日预算（手动点击不计）
+    const today = new Date().toISOString().slice(0, 10);
+    let stat = { day: today, count: 0 };
+    try {
+      const s = JSON.parse(readFileSync(statPath, 'utf8'));
+      if (s && s.day === today) stat = { day: today, count: Number(s.count) || 0 };
+    } catch (e) {}
+    if (!force && stat.count >= Number(cfg.dailyBudget || 0)) return { ok: false, reason: 'daily-budget' };
+
+    let buf;
+    try {
+      buf = await grabScreen(cfg);
+    } catch (e) {
+      const msg = String((e && e.message) || e).slice(0, 160);
+      log(`look 抓帧失败：${msg}`);
+      return { ok: false, reason: 'capture-failed', message: msg };
+    }
+
+    const hash = createHash('sha256').update(buf).digest('hex').slice(0, 16);
+    if (!force && hash === lastFrameHash) return { ok: false, reason: 'same-frame' };
+    lastFrameHash = hash;
+
+    stat = { day: today, count: stat.count + 1 };
+    try {
+      mkdirSync(dirname(statPath), { recursive: true });
+      writeFileSync(statPath, JSON.stringify(stat), 'utf8');
+    } catch (e) {}
+
+    const res = await api.chat(petId, {
+      text: cfg.prompt,
+      attachment: { mediaType: 'image/jpeg', data: buf.toString('base64') },
+    });
+    const ok = !!(res && res.ok === true);
+    log(`look pet=${petId} bytes=${buf.length} hash=${hash} ok=${ok}${ok ? ' text=' + String(res.text || '').slice(0, 24) : ' reason=' + (res && res.reason)}`);
+    return ok
+      ? { ok: true, bytes: buf.length, text: res.text, image: res.image }
+      : { ok: false, reason: (res && res.reason) || 'chat-failed', message: res && res.message, bytes: buf.length };
+  }
+
+  return { feed, status, look, registerMenu: api.registerMenu, readEvents: api.readEvents, api };
 }
 
 /** 数据路径：<DSH_HOME>/pet-kit/feed-state.json，首次从 dsh-pet 目录续上。 */
@@ -245,7 +343,8 @@ export default {
       }
       const baseUrl = `http://127.0.0.1:${port}/dsh-pet-7340`;
       const { statePath } = resolvePaths();
-      const kit = createPetKit({ baseUrl, statePath, log: (s) => console.log('[pet-kit] ' + s) });
+      const configPath = join(dirname(statePath), 'config.json');
+      const kit = createPetKit({ baseUrl, statePath, configPath, log: (s) => console.log('[pet-kit] ' + s) });
 
       let stopped = false;
       let busy = false;
@@ -256,7 +355,7 @@ export default {
         try {
           const r = await kit.registerMenu();
           if (r && r.ok === true) {
-            console.log('[pet-kit] 菜单已注册：投喂 / 状态（右键「更多」下）');
+            console.log('[pet-kit] 菜单已注册：投喂 / 状态 / 看眼屏幕（右键「更多」下）');
             return;
           }
         } catch (e) {}
@@ -279,6 +378,7 @@ export default {
             try {
               if (label === LABELS.feed) await kit.feed(petId);
               else if (label === LABELS.status) await kit.status(petId);
+              else if (label === LABELS.look) await kit.look(petId, { force: true });
             } finally {
               busy = false;
             }
@@ -290,8 +390,27 @@ export default {
       };
       poll();
 
+      // 主动看屏：每 15 秒醒一次，读配置决定要不要看。默认 passive ⇒ 这里什么都不做。
+      let lastLookAt = 0;
+      const tick = setInterval(() => {
+        if (stopped || busy) return;
+        const cfg = readLookConfig(configPath);
+        if (cfg.mode !== 'active') return;
+        if (Date.now() - lastLookAt < Number(cfg.intervalSec || 90) * 1000) return;
+        lastLookAt = Date.now();
+        busy = true;
+        kit
+          .look('main')
+          .catch(() => {})
+          .finally(() => {
+            busy = false;
+          });
+      }, 15000);
+      tick.unref?.();
+
       ctx.effect(() => () => {
         stopped = true;
+        clearInterval(tick);
       });
     });
   },
