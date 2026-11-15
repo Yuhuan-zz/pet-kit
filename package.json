@@ -1,10 +1,24 @@
 {
-  "name": "pet-kit-local",
-  "version": "0.1.0",
-  "private": true,
-  "description": "给 dsh-pet 0.4.8 补回「投喂 / 状态」：第三方菜单项 + 公开 HTTP 接口，不改上游一行",
+  "name": "pet-kit",
+  "version": "0.3.0",
+  "description": "给 dsh-pet 补上投喂、状态和看眼屏幕：只走上游公开 HTTP 接口，不改它一行代码",
+  "license": "MIT",
+  "author": "AyAy1314_",
   "type": "module",
   "main": "index.js",
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "dsh-pet",
+    "desktop-pet"
+  ],
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
@@ -12,5 +26,8 @@
   },
   "engines": {
     "node": ">=22"
+  },
+  "peerDependencies": {
+    "dsh-pet": ">=0.4.8"
   }
 }
