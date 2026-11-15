@@ -34,7 +34,10 @@ pnpm add pet-kit
 
 ## 配置
 
-首次启动会生成 `~/.dsh/pet-kit/config.json`：
+**有设置页**：右键「更多 → 看屏设置」，会在浏览器打开一个本地页面（`http://127.0.0.1:<端口>/pet-kit/settings`），
+改完点保存立刻生效，不用重启。
+
+也可以直接改 `~/.dsh/pet-kit/config.json`，首次启动会自动生成：
 
 ```jsonc
 {
@@ -66,6 +69,9 @@ pnpm add pet-kit
 
 ```
 GET  /pet-kit/health                    插件状态（healthy / detail）
+GET  /pet-kit/settings                  设置页（HTML）
+GET  /pet-kit/config                    读当前 look 配置
+POST /pet-kit/config                    写 look 配置（白名单校验，只改传了的字段）
 POST /pet-kit/feed?pet=<id>             喂一顿
 POST /pet-kit/status?pet=<id>           报状态
 POST /pet-kit/look?pet=<id>             看一眼前屏
