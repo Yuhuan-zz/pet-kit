@@ -536,6 +536,11 @@ export default {
         if (stopped) return;
         try {
           const r = await kit.readEvents(3000);
+          // dsh-pet 的内存菜单表会被宿主重启清空（我们这边却还"活着"）—— 丢了就立刻补登记。
+          if (r && r.reason === 'unknown-owner') {
+            console.warn('[pet-kit] 菜单登记丢了，重新注册');
+            await kit.registerMenu();
+          }
           const events = (r && r.ok && r.events) || {};
           for (const [label, petIdOrNull] of Object.entries(events)) {
             // 事件表里每个 label 常驻，值是 null = 这次没点它。只有非空字符串才是真的点击。
@@ -591,6 +596,27 @@ export default {
           });
       }, 15000);
       tick.unref?.();
+
+      // 心跳：每 60 秒重新登记一次菜单。dsh-pet 的菜单表在它自己的宿主重启后会清空，
+      // 而我们这边毫无感知（healthy 还停在启动时的结果）—— 这是 2026-11-15 真丢过一次的教训。
+      const heartbeat = setInterval(async () => {
+        if (stopped) return;
+        try {
+          const m = await kit.registerMenu();
+          if (m && m.ok === true) {
+            if (!healthy) console.log('[pet-kit] 菜单恢复登记');
+            healthy = true;
+            healthDetail = 'ok';
+          } else {
+            healthy = false;
+            healthDetail = 'menu/item 注册失败：' + ((m && m.reason) || '未知');
+          }
+        } catch (e) {
+          healthy = false;
+          healthDetail = String((e && e.message) || e).slice(0, 160);
+        }
+      }, 60000);
+      heartbeat.unref?.();
 
       // HTTP 入口：给 CLI / 别的插件用，菜单之外的第二条路。
       const ROUTE = '/pet-kit';
@@ -658,6 +684,7 @@ export default {
       ctx.effect(() => () => {
         stopped = true;
         clearInterval(tick);
+        clearInterval(heartbeat);
         try {
           disposeRoute?.();
         } catch (e) {}
