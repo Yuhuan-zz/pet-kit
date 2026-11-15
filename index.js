@@ -348,22 +348,32 @@ export default {
 
       let stopped = false;
       let busy = false;
+      let healthy = false;
+      let healthDetail = '还没检查';
+      let pollStarted = false;
 
-      // 注册菜单项：dsh-pet 可能比我们晚就绪，失败就退避重试。
-      const register = async (attempt = 0) => {
-        if (stopped) return;
+      /**
+       * 健康检查：不只比版本号，直接打两枪——`/state` 的形状对不对、菜单能不能注册。
+       * 版本号在 `/config/meta` 里拿不到（只有 user/default/…/profile），而"接口行为对不对"
+       * 本来就是我们唯一真正依赖的东西。
+       */
+      const checkHealth = async () => {
         try {
-          const r = await kit.registerMenu();
-          if (r && r.ok === true) {
-            console.log('[pet-kit] 菜单已注册：投喂 / 状态 / 看眼屏幕（右键「更多」下）');
-            return;
-          }
-        } catch (e) {}
-        if (attempt < 30) setTimeout(() => register(attempt + 1), Math.min(2000 + attempt * 1000, 10000));
+          const st = await kit.api.state();
+          if (!st || typeof st.counter !== 'number' || typeof st.pets !== 'object') throw new Error('/state 形状不对');
+          const m = await kit.registerMenu();
+          if (!m || m.ok !== true) throw new Error('menu/item 注册失败：' + ((m && m.reason) || '未知'));
+          healthy = true;
+          healthDetail = 'ok';
+          return true;
+        } catch (e) {
+          healthy = false;
+          healthDetail = String((e && e.message) || e).slice(0, 160);
+          return false;
+        }
       };
-      register();
 
-      // 点击轮询：长轮询 3 秒，读取即消费。菜单没注册成功也不妨碍（会一直空转）。
+      // 点击轮询：长轮询 3 秒，读取即消费。
       const poll = async () => {
         if (stopped) return;
         try {
@@ -388,12 +398,27 @@ export default {
         }
         if (!stopped) setTimeout(poll, 50);
       };
-      poll();
+
+      // 健康检查通过才开始轮询；dsh-pet 可能比我们晚就绪，所以带退避重试。
+      const boot = async (attempt = 0) => {
+        if (stopped) return;
+        if (await checkHealth()) {
+          console.log('[pet-kit] 健康检查通过，菜单已注册（投喂 / 状态 / 看眼屏幕）');
+          if (!pollStarted) {
+            pollStarted = true;
+            poll();
+          }
+          return;
+        }
+        if (attempt < 30) setTimeout(() => boot(attempt + 1), Math.min(2000 + attempt * 1000, 10000));
+        else console.warn('[pet-kit] 健康检查连续失败，已禁用：' + healthDetail);
+      };
+      boot();
 
       // 主动看屏：每 15 秒醒一次，读配置决定要不要看。默认 passive ⇒ 这里什么都不做。
       let lastLookAt = 0;
       const tick = setInterval(() => {
-        if (stopped || busy) return;
+        if (stopped || busy || !healthy) return;
         const cfg = readLookConfig(configPath);
         if (cfg.mode !== 'active') return;
         if (Date.now() - lastLookAt < Number(cfg.intervalSec || 90) * 1000) return;
@@ -408,9 +433,42 @@ export default {
       }, 15000);
       tick.unref?.();
 
+      // HTTP 入口：给 CLI / 别的插件用，菜单之外的第二条路。
+      const ROUTE = '/pet-kit';
+      const send = (res, code, obj) => {
+        if (res.writableEnded) return;
+        res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+        res.end(JSON.stringify(obj));
+      };
+      const onlyLoopback = (req) =>
+        ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(String((req.socket && req.socket.remoteAddress) || ''));
+      const handler = async (req, res) => {
+        try {
+          const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+          const rest = decodeURIComponent(url.pathname.slice(ROUTE.length + 1)).replace(/\/+$/, '');
+          const pet = url.searchParams.get('pet') || 'main';
+          if (!onlyLoopback(req)) return send(res, 403, { ok: false, reason: 'loopback-only' });
+          if (rest === 'health' && req.method === 'GET') {
+            return send(res, 200, { ok: true, healthy, detail: healthDetail, upstream: baseUrl });
+          }
+          if (req.method !== 'POST') return send(res, 405, { ok: false, reason: 'method-not-allowed' });
+          if (!healthy) return send(res, 503, { ok: false, reason: 'not-ready', detail: healthDetail });
+          if (rest === 'feed') return send(res, 200, await kit.feed(pet));
+          if (rest === 'status') return send(res, 200, await kit.status(pet));
+          if (rest === 'look') return send(res, 200, await kit.look(pet, { force: true }));
+          return send(res, 404, { ok: false, reason: 'unknown-route' });
+        } catch (e) {
+          return send(res, 500, { ok: false, reason: 'error', message: String((e && e.message) || e) });
+        }
+      };
+      const disposeRoute = ctx.webServer.register({ kind: 'prefix', path: ROUTE, handler });
+
       ctx.effect(() => () => {
         stopped = true;
         clearInterval(tick);
+        try {
+          disposeRoute?.();
+        } catch (e) {}
       });
     });
   },
