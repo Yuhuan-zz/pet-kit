@@ -190,6 +190,20 @@ function readLookConfig(configPath) {
   return { ...LOOK_DEFAULTS, ...(raw.look || {}) };
 }
 
+/** 首次运行时落一份默认配置，用户不用猜字段名；已存在就一个字不动。 */
+export function ensureConfig(configPath) {
+  try {
+    if (readFileSync(configPath, 'utf8')) return { created: false };
+  } catch (e) {}
+  try {
+    mkdirSync(dirname(configPath), { recursive: true });
+    writeFileSync(configPath, JSON.stringify({ look: LOOK_DEFAULTS }, null, 2) + '\n', 'utf8');
+    return { created: true };
+  } catch (e) {
+    return { created: false, error: String((e && e.message) || e) };
+  }
+}
+
 /**
  * 抓一帧屏幕（JPEG 字节，不落盘）。
  * 用 ffmpeg 的 ddagrab（DXGI Desktop Duplication）：和 Electron 的 desktopCapturer 一样是
@@ -344,6 +358,7 @@ export default {
       const baseUrl = `http://127.0.0.1:${port}/dsh-pet-7340`;
       const { statePath } = resolvePaths();
       const configPath = join(dirname(statePath), 'config.json');
+      ensureConfig(configPath);
       const kit = createPetKit({ baseUrl, statePath, configPath, log: (s) => console.log('[pet-kit] ' + s) });
 
       let stopped = false;
