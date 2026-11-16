@@ -524,7 +524,9 @@ export default {
       const { statePath } = resolvePaths();
       const configPath = join(dirname(statePath), 'config.json');
       ensureConfig(configPath);
-      appendTrace(dirname(statePath), 'boot', `port=${port} state=${statePath}`);
+      // 这一层也要有 trace：菜单轮询在这里用它（0.4.3 里漏了，点菜单会抛 ReferenceError 被 catch 吞掉）。
+      const trace = (tag, extra) => appendTrace(dirname(statePath), tag, extra);
+      trace('boot', `port=${port} state=${statePath} `);
       const kit = createPetKit({ baseUrl, statePath, configPath, log: (s) => console.log('[pet-kit] ' + s) });
 
       let stopped = false;
@@ -588,16 +590,20 @@ export default {
       };
 
       // 健康检查通过才开始轮询；dsh-pet 可能比我们晚就绪，所以带退避重试。
+      const startPoll = (from) => {
+        if (pollStarted || stopped) return;
+        pollStarted = true;
+        trace('poll-start', 'from=' + from);
+        poll();
+      };
       const boot = async (attempt = 0) => {
         if (stopped) return;
         if (await checkHealth()) {
           console.log('[pet-kit] 健康检查通过，菜单已注册（投喂 / 状态 / 看眼屏幕）');
-          if (!pollStarted) {
-            pollStarted = true;
-            poll();
-          }
+          startPoll('boot');
           return;
         }
+        trace('boot-fail', `attempt=${attempt} detail=${healthDetail}`);
         if (attempt < 30) setTimeout(() => boot(attempt + 1), Math.min(2000 + attempt * 1000, 10000));
         else console.warn('[pet-kit] 健康检查连续失败，已禁用：' + healthDetail);
       };
@@ -631,6 +637,8 @@ export default {
             if (!healthy) console.log('[pet-kit] 菜单恢复登记');
             healthy = true;
             healthDetail = 'ok';
+            // 关键：boot 那次如果没等到 dsh-pet，轮询就一直没启动 —— 心跳兜住这一步。
+            startPoll('heartbeat');
           } else {
             healthy = false;
             healthDetail = 'menu/item 注册失败：' + ((m && m.reason) || '未知');
