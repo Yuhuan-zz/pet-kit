@@ -127,6 +127,30 @@ export function computeFeed(statePath, nowMs) {
   };
 }
 
+/**
+ * 「现在是多少」——只做衰减，**不预支下一顿**、也不标记任何一餐。
+ * 状态查询必须用这个；用 computeFeed 会把"如果现在喂一口"的结果当成现状显示
+ * （2026-11-16 的真 bug：状态显示 78%，实际 43%，还把没吃的晚饭标成已吃）。
+ */
+export function peekFeed(statePath, nowMs) {
+  let st = null;
+  try {
+    st = JSON.parse(readFileSync(statePath, 'utf8'));
+  } catch (e) {
+    st = null;
+  }
+  if (!st || typeof st.satiety !== 'number') st = { satiety: FEED_DEFAULT, updatedAt: nowMs, eaten: null };
+  const last = Number(st.updatedAt) || nowMs;
+  const dd = nowMs > last ? decayMs(last, nowMs) : 0;
+  const satiety = Math.max(0, Math.min(100, st.satiety - (dd / FEED_HOUR_MS) * FEED_DECAY_PER_HOUR));
+  const key = dayKey(new Date(nowMs));
+  const eaten =
+    st.eaten && st.eaten.day === key
+      ? { day: key, meals: { ...st.eaten.meals }, snacks: Number(st.eaten.snacks) || 0 }
+      : { day: key, meals: {}, snacks: 0 };
+  return { satiety, tier: tierOf(satiety), eaten, updatedAt: nowMs };
+}
+
 /** 状态文案：饱腹度 + 今天吃了什么。 */
 export function statusText(r) {
   const meals = (r.eaten && r.eaten.meals) || {};
@@ -430,8 +454,9 @@ export function createPetKit({ baseUrl, statePath, configPath = join(dirname(sta
 
   async function status(petId = 'main') {
     const before = rawState();
-    const r = computeFeed(statePath, Date.now());
-    trace('status', `pet=${petId} file=${before ? before.satiety.toFixed(2) + '%/' + before.eaten?.day + '/' + JSON.stringify(before.eaten?.meals) + '/snack' + (before.eaten?.snacks ?? '?') : 'none'} => shown=${r.satiety.toFixed(2)}% tier=${r.tier} (不写文件)`);
+    // 用 peekFeed：只算到此刻的衰减，不预支下一顿、不标记任何一餐（0.4.5 修的 bug）。
+    const r = peekFeed(statePath, Date.now());
+    trace('status', `pet=${petId} file=${before ? before.satiety.toFixed(2) + '%/' + before.eaten?.day + '/' + JSON.stringify(before.eaten?.meals) + '/snack' + (before.eaten?.snacks ?? '?') : 'none'} => shown=${r.satiety.toFixed(2)}% tier=${r.tier} meals=${JSON.stringify(r.eaten?.meals)} (不写文件)`);
     const text = statusText(r);
     const out = await perform(petId, { text, anim: null, duration: 8000 });
     log(`status pet=${petId} satiety=${r.satiety.toFixed(1)}`);
