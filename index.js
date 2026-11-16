@@ -18,7 +18,7 @@
  */
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -373,10 +373,28 @@ function grabScreen({ ffmpeg, width, quality }) {
  * 造一个 pet-kit 实例（不含菜单轮询，方便单测）。
  * @param {{ baseUrl: string, statePath: string, log?: (s: string) => void }} opts
  */
+/** 追加一行诊断日志到 <dir>/feed.log（失败就算了，不影响功能）。 */
+export function appendTrace(dir, tag, extra) {
+  try {
+    mkdirSync(dir, { recursive: true });
+    appendFileSync(join(dir, 'feed.log'), new Date().toISOString() + '\t' + tag + '\tpid=' + process.pid + '\t' + extra + '\n', 'utf8');
+  } catch (e) {}
+}
+
 export function createPetKit({ baseUrl, statePath, configPath = join(dirname(statePath), 'config.json'), log = () => {} }) {
   const api = makeApi(baseUrl);
   const statPath = join(dirname(configPath), 'look-stat.json');
   let lastFrameHash = '';
+
+  // 诊断日志：每次读/写状态都留一行。2026-11-16 起用来追「没喂却已吃」。
+  const rawState = () => {
+    try {
+      return JSON.parse(readFileSync(statePath, 'utf8'));
+    } catch (e) {
+      return null;
+    }
+  };
+  const trace = (tag, extra) => appendTrace(dirname(statePath), tag, extra);
 
   /** 一次完整的「说一句 + 演一次」：锁 → 动画 → 气泡 → 放锁。 */
   async function perform(petId, { text, anim, duration }) {
@@ -399,17 +417,21 @@ export function createPetKit({ baseUrl, statePath, configPath = join(dirname(sta
   }
 
   async function feed(petId = 'main') {
+    const before = rawState();
     const r = computeFeed(statePath, Date.now());
     // 先记账，后说话：饱腹度是数据真相，气泡失败只影响体验。
     mkdirSync(dirname(statePath), { recursive: true });
     writeFileSync(statePath, JSON.stringify({ satiety: r.satiety, updatedAt: r.updatedAt, eaten: r.eaten }, null, 2), 'utf8');
+    trace('feed', `pet=${petId} before=${before ? before.satiety.toFixed(2) + '%/' + before.eaten?.day + '/' + JSON.stringify(before.eaten?.meals) + '/snack' + (before.eaten?.snacks ?? '?') + '/upd' + before.updatedAt : 'none'} => after=${r.satiety.toFixed(2)}% reason=${r.reason} add=${r.add} meals=${JSON.stringify(r.eaten.meals)} snack=${r.eaten.snacks}`);
     const out = await perform(petId, { text: r.line, anim: r.anim, duration: 6000 });
     log(`feed pet=${petId} satiety=${r.satiety.toFixed(1)} reason=${r.reason} spoken=${out.ok}${out.animError ? ' anim=' + out.animError : ''}`);
     return { ok: out.ok, satiety: Math.round(r.satiety * 10) / 10, tier: r.tier, line: r.line, anim: r.anim, reason: r.reason, spoken: out.ok, animError: out.animError || null };
   }
 
   async function status(petId = 'main') {
+    const before = rawState();
     const r = computeFeed(statePath, Date.now());
+    trace('status', `pet=${petId} file=${before ? before.satiety.toFixed(2) + '%/' + before.eaten?.day + '/' + JSON.stringify(before.eaten?.meals) + '/snack' + (before.eaten?.snacks ?? '?') : 'none'} => shown=${r.satiety.toFixed(2)}% tier=${r.tier} (不写文件)`);
     const text = statusText(r);
     const out = await perform(petId, { text, anim: null, duration: 8000 });
     log(`status pet=${petId} satiety=${r.satiety.toFixed(1)}`);
@@ -502,6 +524,7 @@ export default {
       const { statePath } = resolvePaths();
       const configPath = join(dirname(statePath), 'config.json');
       ensureConfig(configPath);
+      appendTrace(dirname(statePath), 'boot', `port=${port} state=${statePath}`);
       const kit = createPetKit({ baseUrl, statePath, configPath, log: (s) => console.log('[pet-kit] ' + s) });
 
       let stopped = false;
@@ -549,6 +572,7 @@ export default {
             if (busy) continue;
             busy = true;
             try {
+              trace('click', `label=${label} pet=${petId}`);
               if (label === LABELS.feed) await kit.feed(petId);
               else if (label === LABELS.status) await kit.status(petId);
               else if (label === LABELS.look) await kit.look(petId, { force: true });
