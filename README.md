@@ -94,6 +94,31 @@ POST /pet-kit/look?pet=<id>             看一眼前屏
 2. 删 `node_modules/pet-kit*`；
 3. 想清数据就删 `~/.dsh/pet-kit/`（饱腹度会从 100% 重来）。
 
+## 版本与兼容
+
+- **npm 上的版本才是对外版本**；GitHub 是源码与变更记录（`CHANGELOG.md`）。
+  两边不一致时，以 npm 的 `latest` 为准，见 <https://www.npmjs.com/package/pet-kit>。
+- **数据只增不弃**：新版本必须能读老数据（缺字段回落默认；首次安装会从
+  `~/.dsh/dsh-pet/feed-state.json` 续接）。数据文件名与位置承诺不变：
+  `~/.dsh/pet-kit/{feed-state.json,config.json,look-stat.json,feed.log}`。
+- **依赖上游 dsh-pet >= 0.4.8**。上游大版本变化可能让我们失效——插件启动会做行为探测
+  （`GET /state` 形状 + `POST /menu/item`），不通过就整体禁用，原因写在
+  `GET /pet-kit/health` 的 `detail` 里，不会静默坏掉。
+- ⚠️ **0.4.2 及更早的「状态」显示有误**（会把没吃的下一顿预支进去，分数虚高）。
+  请升级到 **0.4.5+**。npm 上那些旧版本无法撤回（72 小时窗口已过），只能靠升级。
+
+### 回滚到指定版本
+
+```bash
+pnpm add pet-kit@0.4.4      # 换成你想回的那个版本号
+```
+
+然后**完全退出 DSH 再打开**。回滚不会动 `~/.dsh/pet-kit/` 里的数据，饱腹度不会重置。
+
+### 出问题时报什么
+
+给我三样就够定位：**版本号**、`GET /pet-kit/health` 的返回、`~/.dsh/pet-kit/feed.log` 最后十几行。
+
 ## 许可证
 
 MIT（见 `LICENSE`）。上游 dsh-pet 也是 MIT。
